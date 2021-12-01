@@ -1,0 +1,1421 @@
+---
+title: "EnsembleModel"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+
+###############################################################################
+# This code was written by Benjamin Golas. It was developed to download and 
+# organize bat-borne temperature and humidity logger readings, evaluate them
+# through the lens of the energetics and hydration models, and implement our 
+# custom-coded Bayesian ensemble model using JAGS.
+###############################################################################
+```
+
+```{r data viz}
+
+######################################################################
+# Upload, clean, and visualize data from each logger
+######################################################################
+
+setwd("C:/Users/bengo/Documents/WNS/BATPACK_ANALYSIS/Data")
+
+set.seed(210118)
+
+library(tidyverse)
+library(lubridate)
+library(cowplot)
+library(ghibli)
+
+L1 <- read.csv("PhaseIV_LogAndTempData_SerialNumber_71__6155211993.csv",skip=2)
+DateTime <- as_datetime(as.POSIXct(paste(L1$UTC.Date,L1$UTC.Time),format="%m/%d %H:%M"))
+X <- which(format.Date(DateTime, "%m")=="12" & format.Date(DateTime, "%d")=="31" & format.Date(DateTime, "%H")==23)
+year(DateTime[1:X]) <- 2018
+year(DateTime[(X+1):length(DateTime)]) <- 2019
+L1.Mark <- read.csv("071_Marked.csv",skip=2)
+L1 <- cbind(L1,DateTime,L1.Mark$Status,"071")
+colnames(L1) <- c("Date","Time","Temp","RH","DateTime","Marker","Logger")
+# plot(DateTime,1:length(DateTime))
+
+L2 <- read.csv("PhaseIV_LogAndTempData_SerialNumber_101__765435392.csv",skip=2)
+DateTime <- as_datetime(as.POSIXct(paste(L2$UTC.Date,L2$UTC.Time),format="%m/%d %H:%M"))
+X <- which(format.Date(DateTime, "%m")=="12" & format.Date(DateTime, "%d")=="31" & format.Date(DateTime, "%H")==23)
+year(DateTime[1:X]) <- 2018
+year(DateTime[(X+1):length(DateTime)]) <- 2019
+L2.Mark <- read.csv("101_Marked.csv",skip=2)
+L2 <- cbind(L2,DateTime,L2.Mark$Status,"101")
+colnames(L2) <- c("Date","Time","Temp","RH","DateTime","Marker","logger")
+# plot(DateTime,1:length(DateTime))
+
+L3 <- read.csv("PhaseIV_LogAndTempData_SerialNumber_227__77635195.csv",skip=2)
+DateTime <- as_datetime(as.POSIXct(paste(L3$UTC.Date,L3$UTC.Time),format="%m/%d %H:%M"))
+X <- which(format.Date(DateTime, "%m")=="12" & format.Date(DateTime, "%d")=="31" & format.Date(DateTime, "%H")==23)
+year(DateTime[1:X]) <- 2018
+year(DateTime[(X+1):length(DateTime)]) <- 2019
+L3.Mark <- read.csv("227_Marked.csv",skip=2)
+L3 <- cbind(L3,DateTime,L3.Mark$Status,"101")
+colnames(L3) <- c("Date","Time","Temp","RH","DateTime","Marker","Logger")
+# plot(DateTime,1:length(DateTime))
+
+setwd("C:/Users/bengo/Documents/WNS/BATPACK_ANALYSIS")
+
+# ggplot() + theme_classic() +
+#   geom_line(data=L1,aes(DateTime,Temp),col="red") +
+#   geom_line(data=L2,aes(DateTime,Temp),col="pink") +
+#   geom_line(data=L3,aes(DateTime,Temp),col="maroon") 
+# 
+# ggplot() + theme_classic() +
+#   geom_line(data=L1,aes(DateTime,RH),col="blue") +
+#   geom_line(data=L2,aes(DateTime,RH),col="darkturquoise") +
+#   geom_line(data=L3,aes(DateTime,RH),col="deepskyblue") 
+# 
+# 
+# p1 <- ggplot() + theme_classic() + 
+#   geom_line(data=L1,aes(DateTime,Temp),col="red") +
+#   xlab("") +ylab("Temperature (Celsius)") +
+#   theme(text=element_text(size=12))
+# 
+# p2 <- ggplot() + theme_classic() +
+#   geom_line(data=L1,aes(DateTime,RH),col="blue") +
+#   xlab("Date") + ylab("Relative Humidity (%)") +
+#   theme(text=element_text(size=12))
+# 
+# plot_grid(p1,p2,ncol=1)
+# 
+# ggplot() + theme_classic() +
+#   geom_line(data=L2,aes(DateTime,RH),col="darkturquoise") +
+#   geom_line(data=L2,aes(DateTime,Temp),col="pink")
+# 
+# ggplot() + theme_classic() +
+#   geom_line(data=L3,aes(DateTime,RH),col="deepskyblue") +
+#   geom_line(data=L3,aes(DateTime,Temp),col="maroon")
+# 
+# 
+# 
+# L1.trim <- rbind(L1[(format.Date(L1$DateTime, "%m")<="09" & format.Date(L1$DateTime, "%Y")=="2018" & !is.na(L1$DateTime)),])
+# 
+# ggplot() + theme_classic() +
+#   geom_line(data=L1.trim,aes(DateTime,RH),col="blue") +
+#   geom_line(data=L1.trim,aes(DateTime,Temp),col="red")
+
+L1$RH[which(L1$Temp<0)] <- 100
+for(i in 1:10){
+L1$Temp[which(L1$Temp< (-10))] <- L1$Temp[which(L1$Temp<0)-1]
+}
+
+
+```
+
+```{r Energy equation parameters}
+
+#####################################################################
+# Define literature-based parameters for energetics equations
+#####################################################################
+
+L1.trim <- L1[which(L1$Marker == "Start"):which(L1$Marker == "End"),]
+L2.trim <- L2[which(L2$Marker == "Start"):which(L2$Marker == "End"),]
+L3.trim <- L3[which(L3$Marker == "Start"):which(L3$Marker == "End"),]
+
+#Parameter list for Hayman 2016 energetics equations big brown bats
+T.tor.min <- 3.5
+B.1.Pd <- 1.15*10^(-3)
+B.2.Pd <- 0.27
+T.min <- 0
+T.max <- 19.7
+mu.1.Pd <- 1.51*10^(-4)
+mu.2.Pd <- -9.92*10^(-3)
+RMR <- 1.13
+T.lc <- 31.35
+TMR.min <- 0.028
+C.t <- 0.055
+S <- 0.131
+
+#Parameter list from Haase 2019 Cooling paper
+WR <- 90
+C.eu <- 0.20
+T.eu <- 37
+Mb <- 18 #body mass
+SA.body <- 10*Mb^(2/3)
+SA.wing <- SA.body*19.68/39.36
+rEWL.wing <- 0.33
+rEWL.body <- 0.10
+LeanMass <- Mb*.7
+Q10.cool <- 3.82-0.507*log10(Mb)
+
+fat.winter <- Mb*.3
+E.winter <- fat.winter*37.6*1000/19.6
+
+```
+
+```{r scaler estimation from Klug-Baerwald}
+
+############################################################################
+# Estimate scaling difference in cutaneous evaporative water loss
+# between big brown bats in Klug-Baerwald study vs. little brown bats in 
+# Haase 2019
+############################################################################
+
+EWL.t <- 4.8
+Mb.KB <- 20.2
+T.a.KB <- 7.4
+WVP.KB <- 0.07
+SVP.KB <- .611*exp((17.503*T.a.KB)/(T.a.KB+240.97))
+d.WVP.KB <- SVP.KB - WVP.KB
+mW <- 5.2
+TMR.KB <- mW/(.179*Mb.KB)
+RAV.KB <- TMR.KB*Mb.KB/(.2095*.3*1000)
+sat.def.KB <- d.WVP.KB/(.46152*(273.15+T.a.KB))
+
+delta <- (EWL.t-RAV.KB*sat.def.KB)/((SA.body*rEWL.body+SA.wing*rEWL.wing)*d.WVP.KB)
+
+```
+
+```{r Algorithm for expected length and other measures}
+################################################################################
+# Define energetics function that includes both Hayman and Haase equations, 
+# calculating torpor expectations for given microclimate based on two different
+# deterministic models while also summarizing out data
+################################################################################
+
+ENERGY.COMPARE <- function(Temp, WVP, Marker, DateTime){
+  
+#set up table to record data
+  start.bouts <- which(Marker=="Start" | Marker=="Cooling")
+  output <- as.data.frame(matrix(NA, nrow=length(start.bouts), ncol=26))
+  colnames(output) <- c("t.bat","t.T","t.TWVP",
+                        "E.bat","E.T","E.TWVP",
+                        "T.bat","T.T","T.TWVP",
+                        "WVP.bat","WVP.T","WVP.TWVP",
+                        "T.end.bat","T.end.T","T.end.TWVP",
+                        "WVP.end.bat","WVP.end.T","WVP.end.TWVP",
+                        "t.TWVP.scale", "E.TWVP.scale", "T.TWVP.scale",
+                        "WVP.TWVP.scale", "T.end.TWVP.scale", "WVP.end.TWVP.scale",
+                        "d.WVP.mean", "Euthermic")
+#forloop to run through each torpot bout
+  for(n in 1:length(start.bouts)){
+    t.start <- start.bouts[n] #starting timepoint
+    T.a <- Temp[t.start+2] #starting temperature at time of cooling
+    WVP.a <- WVP[t.start+2]
+    T.mean <- T.a
+    WVP.mean <- WVP.a
+    
+    E.hib <- 0
+    
+    mark.last <- "Euthermic"
+    TIME <- 0
+    
+    #Run through first cooling event outside for loop
+    #First cooling
+    CR <- C.eu*(Mb^0.67)*log10(T.eu-T.a)/(S*Mb)
+    t.event <- log10(T.eu-T.a)/CR #Time for event
+    TIME <- t.event + TIME
+    E.event <- t.event*(TMR.min+(RMR*Q10.cool^((T.a-T.eu)/10)))
+    mark.last <- "Cooling"
+    E.hib <- E.hib + E.event
+    #Round out first torpor
+    t.event <- ceiling(TIME)-TIME
+    if(t.event == 0) t.event <- 1
+    if(T.a > T.tor.min){
+        Q10 <- 1.6+0.26*T.a-0.006*T.a^2
+        E.event <- t.event*TMR.min*Q10^((T.a-T.tor.min)/10)
+      }else{
+        E.event <- t.event*(TMR.min+(T.tor.min-T.a)*C.t)
+      }
+    mark.last <- "Torpor"
+    TIME <- TIME + t.event
+    E.hib <- E.hib+E.event
+    #Another hour of torpor to be safe
+    T.a <- Temp[t.start + TIME]
+    T.mean <- (T.mean*(TIME) + T.a)/(TIME+1)
+    WVP.a <- max(WVP[t.start + TIME],0)
+    WVP.mean <- (WVP.mean*(TIME) + WVP.a)/(TIME+1)
+    t.event <- 1
+    if(T.a > T.tor.min){
+        Q10 <- 1.6+0.26*T.a-0.006*T.a^2
+        E.event <- t.event*TMR.min*Q10^((T.a-T.tor.min)/10)
+      }else{
+        E.event <- t.event*(TMR.min+(T.tor.min-T.a)*C.t)
+      }
+    mark.last <- "Torpor"
+    E.hib <- E.hib+E.event
+    
+    TIME <- TIME + 1
+    TIME.start <- TIME
+    
+    #Using bat's torpor temp, not T.a, given a minimum held torpor temp
+    WVP.bat <- .611*exp((17.503*max(T.a,T.tor.min))/(max(T.a,T.tor.min)+240.97)) #Haase conversion
+    d.WVP <- max(WVP.bat-WVP.a,0)
+    d.WVP.mean <- d.WVP
+    CEWL <- (SA.body*rEWL.body+SA.wing*rEWL.wing)*d.WVP
+    CEWL.scale <- (SA.body*rEWL.body*delta+SA.wing*rEWL.wing*delta)*d.WVP
+    rav <- TMR.min*Mb/(0.2095*0.30*10^3)
+    Sat.deficit <- d.WVP/(.46152*(273.15+T.a))
+    REWL <- rav*Sat.deficit
+        
+    t.tor.EWL <- 0.027*LeanMass*1000/(CEWL+REWL)
+    t.tor.EWL.scale <- 0.027*LeanMass*1000/(CEWL.scale+REWL)
+    
+    
+    for(t in TIME.start:10000){ #forloop through energy events by hour
+      
+
+       #If "Torpor"", adjust T.a/WVP.a based on current measurement.
+      if(Marker[t.start + t]=="Torpor"){
+        T.a <- Temp[t.start + t]
+        WVP.a <- max(WVP[t.start + t],0)
+      }
+      T.mean <- (T.mean*(TIME) + T.a)/(TIME+1)
+      WVP.mean <- (WVP.mean*(TIME) + WVP.a)/(TIME+1)
+      
+      #Calculate energy for hour of torpor
+      t.event <- 1
+      if(T.a > T.tor.min){
+        Q10 <- 1.6+0.26*T.a-0.006*T.a^2
+        E.event <- t.event*TMR.min*Q10^((T.a-T.tor.min)/10)
+      }else{
+        E.event <- t.event*(TMR.min+(T.tor.min-T.a)*C.t)
+      }
+      
+      #Calculate torpor time based on models using average temperature and hourly WVP over torpor bout
+      if(T.mean > T.tor.min){
+        Q10 <- 1.6+0.26*T.mean-0.006*T.mean^2
+        t.tor.TMR <- t.tormax/Q10^((T.mean-T.tor.min)/10)
+      }else{
+        t.tor.TMR <- t.tormax/(1+(T.tor.min-T.mean)*(C.t/TMR.min))
+      }
+      WVP.bat <- .611*exp((17.503*max(T.a,T.tor.min))/(max(T.a,T.tor.min)+240.97)) #Haase conversion
+      d.WVP <- max(WVP.bat-WVP.a,0)
+      d.WVP.mean <- (d.WVP+d.WVP.mean*TIME)/(TIME+1) #calculate average d.WVP through torpor bout
+      CEWL <- ((SA.body*rEWL.body+SA.wing*rEWL.wing)*d.WVP + CEWL*TIME)/(TIME+1)
+      CEWL.scale <- ((SA.body*rEWL.body*delta+SA.wing*rEWL.wing*delta)*d.WVP + CEWL.scale*TIME)/(TIME+1)
+      rav <- TMR.min*Mb/(0.2095*0.30*10^3)
+      Sat.deficit <- d.WVP/(.46152*(273.15+T.a))
+      REWL <- rav*Sat.deficit + REWL
+        
+      t.tor.EWL <- 0.027*LeanMass*1000/(CEWL+REWL)
+      t.tor.EWL.scale <- 0.027*LeanMass*1000/(CEWL.scale+REWL)
+      
+      
+      E.hib <- E.hib+E.event
+      
+      
+      #Data input for bat
+      if(Marker[t.start + t]=="Warming" & is.na(output[n,1])=="TRUE"){
+        #Warming event
+        t.event.end <- (T.eu-T.a)/WR
+        E.event.end <- S*(T.eu-T.a)+t.event*(C.eu*(T.eu-T.a))
+        E.hib.end <- E.hib+E.event.end
+        T.mean <- (T.mean*(TIME) + T.a*t.event.end)/(TIME+t.event.end)
+        WVP.mean <- (WVP.mean*(TIME) + WVP.a)/(TIME+1)
+        Euthermic <- 0
+        for(i in 1:20){
+          if(Marker[t.start+t+i]!="Euthermic") break
+          Euthermic <- Euthermic+1
+        }
+        #Data input
+        output[n,1] <- TIME + t.event.end
+        output[n,4] <- E.hib.end
+        output[n,7] <- T.mean
+        output[n,10] <- WVP.mean
+        output[n,13] <- T.a
+        output[n,16] <- WVP.a
+        output[n,25] <- d.WVP.mean
+        output[n,26] <- Euthermic
+      }
+      
+      #Data input for T model
+      if(t.tor.TMR <= TIME & is.na(output[n,2])=="TRUE"){
+        #Warming event
+        t.event.end <- (T.eu-T.a)/WR
+        E.event.end <- S*(T.eu-T.a)+t.event*(C.eu*(T.eu-T.a))
+        E.hib.end <- E.hib+E.event.end
+        T.mean <- (T.mean*(TIME) + T.a*t.event.end)/(TIME+t.event.end)
+        WVP.mean <- (WVP.mean*(TIME) + WVP.a)/(TIME+1)
+        #Data input
+        output[n,2] <- TIME + t.event.end
+        output[n,5] <- E.hib.end
+        output[n,8] <- T.mean
+        output[n,11] <- WVP.mean
+        output[n,14] <- T.a
+        output[n,17] <- WVP.a
+      }
+      
+      #Data input for TWVP model
+      t.tor.TWVP <- min(t.tor.TMR, t.tor.EWL)
+      if(t.tor.TWVP <= TIME & is.na(output[n,3])=="TRUE"){
+        #Warming event
+        t.event.end <- (T.eu-T.a)/WR
+        E.event.end <- S*(T.eu-T.a)+t.event*(C.eu*(T.eu-T.a))
+        E.hib.end <- E.hib+E.event.end
+        T.mean <- (T.mean*(TIME) + T.a*t.event.end)/(TIME+t.event.end)
+        WVP.mean <- (WVP.mean*(TIME) + WVP.a)/(TIME+1)
+        #Data input
+        output[n,3] <- TIME + t.event.end
+        output[n,6] <- E.hib.end
+        output[n,9] <- T.mean
+        output[n,12] <- WVP.mean
+        output[n,15] <- T.a
+        output[n,18] <- WVP.a
+      }
+      
+      #Data input for TWVP model with EWL scaled for E. fuscus
+      t.tor.TWVP.scale <- min(t.tor.TMR, t.tor.EWL.scale)
+      if(t.tor.TWVP.scale <= TIME & is.na(output[n,19])=="TRUE"){
+        #Warming event
+        t.event.end <- (T.eu-T.a)/WR
+        E.event.end <- S*(T.eu-T.a)+t.event*(C.eu*(T.eu-T.a))
+        E.hib.end <- E.hib+E.event.end
+        T.mean <- (T.mean*(TIME) + T.a*t.event.end)/(TIME+t.event.end)
+        WVP.mean <- (WVP.mean*(TIME) + WVP.a)/(TIME+1)
+        #Data input
+        output[n,19] <- TIME + t.event.end
+        output[n,20] <- E.hib.end
+        output[n,21] <- T.mean
+        output[n,22] <- WVP.mean
+        output[n,23] <- T.a
+        output[n,24] <- WVP.a
+      }
+      
+      #Ultimate end condition when all data row filled out
+      if(anyNA(output[n,])=="FALSE") break
+      
+      TIME <- TIME + 1
+      
+    } #end torpor for single bout
+    
+    #The last point in the column of Euthermic bout length is actually the total hibernation time
+    output[nrow(output),26] <- which(Marker=="End")-which(Marker=="Start")
+    
+  } #end forloop for all bouts
+  
+  return(output)
+  
+} #end function
+
+
+```
+
+```{r running function for model description}
+
+######################################################################
+# Run energetics function for each bat in turn
+######################################################################
+
+#Parameters
+t.tormax <- 792
+
+E1 <- ENERGY.COMPARE(Temp=L1$Temp,
+               WVP=L1$RH*(0.611*exp((17.503*L1$Temp)/(240.97+L1$Temp)))/100, 
+               Marker= L1.Mark$Status, 
+               DateTime=L1$DateTime)
+n.T <- 1:length(E1[,1]) # number of torpors on the logger
+E1 <- cbind(E1,n.T)
+
+E2 <- ENERGY.COMPARE(Temp=L2$Temp,
+               WVP=L2$RH*(0.611*exp((17.503*L2$Temp)/(240.97+L2$Temp)))/100, 
+               Marker= L2.Mark$Status, 
+               DateTime=L2$DateTime)
+n.T <- 1:length(E2[,1])
+E2 <- cbind(E2,n.T)
+
+E3 <- ENERGY.COMPARE(Temp=L3$Temp,
+               WVP=L3$RH*(0.611*exp((17.503*L3$Temp)/(240.97+L3$Temp)))/100, 
+               Marker= L3.Mark$Status, 
+               DateTime=L3$DateTime)
+n.T <- 1:length(E3[,1])
+E3 <- cbind(E3,n.T)
+
+
+#Remove outlying datum
+# E1 <- E1[-4,]
+```
+
+```{r calculate torpor bout length based on average temp/WVP per bout}
+
+###############################################################################
+# Calculate deterministic expectations based on average torpor microclimates
+# as opposed to real-time measurements as in ENERGY.COMPARE
+###############################################################################
+
+
+bout.length.average.Hayman <- rep(NA,length(E1[,1]))
+bout.length.average.Haase <- rep(NA,length(E1[,1]))
+CEWL <- 0
+REWL <- 0
+for(i in 1:length(E1[,1])){
+  T.a <- E1$T.bat[i]
+  WVP.a <- E1$WVP.bat[i]
+  Q10 <- 1.6+0.26*T.a-0.006*T.a^2
+  CR <- C.eu*(Mb^0.67)*log10(T.eu-T.a)/(S*Mb)
+        
+  t.cool <- log10(T.eu-T.a)/CR
+  t.bout.Hayman <- ifelse(T.a<=T.tor.min, 
+                   t.tormax/(1+(T.tor.min-T.a)*(C.t/TMR.min)),
+                   t.tormax/Q10^((T.a-T.tor.min)/10))
+  t.warm <- (T.eu-T.a)/WR
+  bout.length.average.Hayman[i] <- t.cool+t.bout.Hayman+t.warm
+
+  WVP.bat <- .611*exp((17.503*max(T.a,T.tor.min))/(max(T.a,T.tor.min)+240.97))
+  d.WVP <- WVP.bat-WVP.a
+  CEWL <- (SA.body*rEWL.body+SA.wing*rEWL.wing)*d.WVP
+  rav <- TMR.min*Mb/(0.2095*0.30*10^3)
+  Sat.deficit <- d.WVP/(.46152*(273.15+T.a))
+     
+  REWL <- rav*Sat.deficit
+        
+  t.tor.EWL <- 0.027*LeanMass*1000/(CEWL+REWL)
+
+  
+  bout.length.average.Haase[i] <- t.cool+min(t.tor.EWL,t.bout.Hayman)+t.warm
+}
+
+E1.boutlength <- cbind(E1,bout.length.average.Hayman,bout.length.average.Haase)
+
+# ggplot(E1.boutlength) + theme_classic() + ggtitle("E1") +
+#   xlab("Hour to hour estimate") +ylab("Average estimate") +
+#   geom_point(aes(t.T,bout.length.average.Hayman), color="red") +
+#   geom_point(aes(t.TWVP,bout.length.average.Haase), color="blue") +
+#   geom_abline(intercept=1, slope=1) +
+#   geom_smooth(aes(t.T,bout.length.average.Hayman), color="red", method = "lm", alpha = 0.3) +
+#   geom_smooth(aes(t.TWVP,bout.length.average.Haase), color="blue", method = "lm", alpha = 0.3)
+
+
+
+
+
+bout.length.average.Hayman <- rep(NA,length(E2[,1]))
+bout.length.average.Haase <- rep(NA,length(E2[,1]))
+CEWL <- 0
+REWL <- 0
+for(i in 1:length(E2[,1])){
+  T.a <- E2$T.bat[i]
+  WVP.a <- E2$WVP.bat[i]
+  Q10 <- 1.6+0.26*T.a-0.006*T.a^2
+  CR <- C.eu*(Mb^0.67)*log10(T.eu-T.a)/(S*Mb)
+        
+  t.cool <- log10(T.eu-T.a)/CR
+  t.bout.Hayman <- ifelse(T.a<=T.tor.min, 
+                   t.tormax/(1+(T.tor.min-T.a)*(C.t/TMR.min)),
+                   t.tormax/Q10^((T.a-T.tor.min)/10))
+  t.warm <- (T.eu-T.a)/WR
+  bout.length.average.Hayman[i] <- t.cool+t.bout.Hayman+t.warm
+
+  WVP.bat <- .611*exp((17.503*max(T.a,T.tor.min))/(max(T.a,T.tor.min)+240.97))
+  d.WVP <- WVP.bat-WVP.a
+  CEWL <- (SA.body*rEWL.body+SA.wing*rEWL.wing)*d.WVP
+  rav <- TMR.min*Mb/(0.2095*0.30*10^3)
+  Sat.deficit <- d.WVP/(.46152*(273.15+T.a))
+     
+  REWL <- rav*Sat.deficit
+        
+  t.tor.EWL <- 0.027*LeanMass*1000/(CEWL+REWL)
+  
+  bout.length.average.Haase[i] <- t.cool+min(t.tor.EWL,t.bout.Hayman)+t.warm
+}
+
+E2.boutlength <- cbind(E2,bout.length.average.Hayman,bout.length.average.Haase)
+
+# ggplot(E2.boutlength) + theme_classic() + ggtitle("E2") +
+#   xlab("Hour to hour estimate") +ylab("Average estimate") +
+#   geom_point(aes(t.T,bout.length.average.Hayman), color="red") +
+#   geom_point(aes(t.TWVP,bout.length.average.Haase), color="blue") +
+#   geom_abline(intercept=1, slope=1) +
+#   geom_smooth(aes(t.T,bout.length.average.Hayman), color="red", method = "lm", alpha = 0.3) +
+#   geom_smooth(aes(t.TWVP,bout.length.average.Haase), color="blue", method = "lm", alpha = 0.3)
+
+
+
+bout.length.average.Hayman <- rep(NA,length(E3[,1]))
+bout.length.average.Haase <- rep(NA,length(E3[,1]))
+CEWL <- 0
+REWL <- 0
+for(i in 1:length(E3[,1])){
+  T.a <- E3$T.bat[i]
+  WVP.a <- E3$WVP.bat[i]
+  Q10 <- 1.6+0.26*T.a-0.006*T.a^2
+  CR <- C.eu*(Mb^0.67)*log10(T.eu-T.a)/(S*Mb)
+        
+  t.cool <- log10(T.eu-T.a)/CR
+  t.bout.Hayman <- ifelse(T.a<=T.tor.min, 
+                   t.tormax/(1+(T.tor.min-T.a)*(C.t/TMR.min)),
+                   t.tormax/Q10^((T.a-T.tor.min)/10))
+  t.warm <- (T.eu-T.a)/WR
+  bout.length.average.Hayman[i] <- t.cool+t.bout.Hayman+t.warm
+
+  WVP.bat <- .611*exp((17.503*max(T.a,T.tor.min))/(max(T.a,T.tor.min)+240.97))
+  d.WVP <- WVP.bat-WVP.a
+  CEWL <- (SA.body*rEWL.body+SA.wing*rEWL.wing)*d.WVP
+  rav <- TMR.min*Mb/(0.2095*0.30*10^3)
+  Sat.deficit <- d.WVP/(.46152*(273.15+T.a))
+     
+  REWL <- rav*Sat.deficit
+        
+  t.tor.EWL <- 0.027*LeanMass*1000/(CEWL+REWL)
+  
+  bout.length.average.Haase[i] <- t.cool+min(t.tor.EWL,t.bout.Hayman)+t.warm
+}
+
+E3.boutlength <- cbind(E3,bout.length.average.Hayman,bout.length.average.Haase)
+
+# ggplot(E3.boutlength) + theme_classic() + ggtitle("E3") +
+#   xlab("Hour to hour estimate") +ylab("Average estimate") +
+#   geom_point(aes(t.T,bout.length.average.Hayman), color="red") +
+#   geom_point(aes(t.TWVP,bout.length.average.Haase), color="blue") +
+#   geom_abline(intercept=1, slope=1) +
+#   geom_smooth(aes(t.T,bout.length.average.Hayman), color="red", method = "lm", alpha = 0.3) +
+#   geom_smooth(aes(t.TWVP,bout.length.average.Haase), color="blue", method = "lm", alpha = 0.3)
+
+```
+
+```{r testing that average estimates do not fit the measured data better}
+
+#####################################################################
+# Quality control assessment to show that average values give
+# approximately good fit compared to real-time microclimates
+#####################################################################
+
+
+
+# ggplot(E1.boutlength) + theme_classic() + ggtitle("E1") +
+#   xlab("Measured torpor length") +ylab("Average estimate") +
+#   geom_point(aes(t.bat,bout.length.average.Hayman), color="red") +
+#   geom_point(aes(t.bat,bout.length.average.Haase), color="blue") +
+#   geom_abline(intercept=1, slope=1) +
+#   geom_smooth(aes(t.bat,t.T), color="red", method = "lm", alpha = 0.3) +
+#   geom_smooth(aes(t.bat,t.TWVP), color="blue", method = "lm", alpha = 0.3)
+# 
+# ggplot(E2.boutlength) + theme_classic() + ggtitle("E2") +
+#   xlab("Measured torpor length") +ylab("Average estimate") +
+#   geom_point(aes(t.bat,bout.length.average.Hayman), color="red") +
+#   geom_point(aes(t.bat,bout.length.average.Haase), color="blue") +
+#   geom_abline(intercept=1, slope=1) +
+#   geom_smooth(aes(t.bat,t.T), color="red", method = "lm", alpha = 0.3) +
+#   geom_smooth(aes(t.bat,t.TWVP), color="blue", method = "lm", alpha = 0.3)
+# 
+# ggplot(E3.boutlength) + theme_classic() + ggtitle("E3") +
+#   xlab("Measured torpor length") +ylab("Average estimate") +
+#   geom_point(aes(t.bat,bout.length.average.Hayman), color="red") +
+#   geom_point(aes(t.bat,bout.length.average.Haase), color="blue") +
+#   geom_abline(intercept=1, slope=1) +
+#   geom_smooth(aes(t.bat,t.T), color="red", method = "lm", alpha = 0.3) +
+#   geom_smooth(aes(t.bat,t.TWVP), color="blue", method = "lm", alpha = 0.3)
+
+```
+
+```{r generate data}
+
+################################################################
+# Some simulated data for quality control purposes
+################################################################
+
+
+#population values
+C <- 0.2
+C.t <- 0.055
+percent.fat <- 0.3
+rEWL.body <- 0.1
+rEWL.wing <- 0.33
+RH <- 0.95
+S <- 0.131
+T.eu <- 35
+T.tor.min <- 3.5
+t.tor.max <- 792
+TMR.min <- 0.028
+WR <- 90
+
+#Individual values
+M.body <- c(18,25,20)
+n.bouts <- c(17,25,20)
+
+#Make up measured environmental conditions
+
+mu.RH <- .95
+s.RH <- 0.12
+a.RH <- (mu.RH^2-mu.RH^3-mu.RH*s.RH^2)/s.RH^2
+b.RH <- (mu.RH-2*mu.RH^2+mu.RH^3-s.RH^2+mu.RH*s.RH^2)/s.RH^2
+
+env.cond <- NA
+for(i in 1:length(n.bouts)){
+  T.a <- rnorm(n.bouts[i],5,3)
+  RH <- rbeta(n.bouts[i],a.RH,b.RH)
+  WVP.bat <- (.611*exp((17.503*max(T.a,T.tor.min))/(max(T.tor.min,T.a)+240.97)))
+  WVP.a <- (.611*exp((17.503*T.a)/(T.a+240.97)))*RH
+  d.WVP <- WVP.bat-WVP.a
+  env.cond <- rbind(env.cond,cbind(T.a,RH,d.WVP,i))
+}
+env.cond <- env.cond[-1,]
+env.cond <- as.data.frame(cbind(env.cond,NA,NA))
+colnames(env.cond) <- c("T.a","RH","d.WVP","index.bat","bout.length.Hayman","bout.length.Haase")
+
+sigma <- 40
+
+M.fat <- M.body*percent.fat
+M.lean <- M.body - M.fat #total body mass
+
+SA.body <- 10*M.body^(2/3) #body surface area
+SA.wing <- SA.body*19.68/39.36 #wing surface area, per Haase2019
+
+
+for(j in 1:length(env.cond[,1])){
+  
+  Q10 <- 1.6+0.26*env.cond$T.a[j]-0.006*env.cond$T.a[j]^2
+  T.tor <- max(env.cond$T.a[j],T.tor.min)
+  
+  mu.bout.length.Hayman <- log10(T.eu-T.tor)/(C*M.body[env.cond$index.bat[j]]^0.67*log10(T.eu-env.cond$T.a[j])/(S*M.body[env.cond$index.bat[j]])) + ifelse(env.cond$T.a[j]<=T.tor.min, t.tor.max/(1+(T.tor.min-env.cond$T.a[j])*(C.t/TMR.min)),       t.tor.max/Q10^((env.cond$T.a[j]-T.tor.min)/10)) + (T.eu-env.cond$T.a[j])/WR
+  
+  env.cond$bout.length.Hayman[j] <- rgamma(1,shape=mu.bout.length.Hayman^2/sigma^2,rate=mu.bout.length.Hayman/sigma^2)
+  
+  mu.bout.length.WVP <- (log(T.eu-T.tor)/log(10))/(C*M.body[env.cond$index.bat[j]]^0.67*(log(T.eu-env.cond$T.a[j])/log(10))/(S*M.body[env.cond$index.bat[j]])) + (0.027*M.lean[env.cond$index.bat[j]]*1000)/(((SA.body[env.cond$index.bat[j]]*rEWL.body+SA.wing[env.cond$index.bat[j]]*rEWL.wing)*env.cond$d.WVP[j]) + ((TMR.min*M.body[env.cond$index.bat[j]]/(0.2095*0.30*10^3))*(env.cond$d.WVP[j]/(.46152*(273.15+env.cond$T.a[j]))))) + (T.eu-env.cond$T.a[j])/WR
+  
+  env.cond$bout.length.Haase[j] <- rgamma(1, shape=min(mu.bout.length.Hayman,mu.bout.length.WVP)^2/sigma^2, rate=min(mu.bout.length.Hayman,mu.bout.length.WVP)/sigma^2)
+  
+}
+
+# ggplot(env.cond) +ggtitle("Expected bout length as a function of environment") +
+#   xlab("Temperature") + ylab("WVP deficit") +
+#   geom_point(aes(T.a,d.WVP,color=bout.length.Haase)) +
+#   scale_color_viridis_c()
+
+
+```
+
+
+```{r Guided Underperformance ensemble model individuals of population}
+{
+sink("BoutLengthEnsembleGuidedUnderperformancePopulationToIndividual.R")
+cat("
+model{
+
+#Priors, using literature-based distributions for estimated parameters
+
+
+for(i in 1:n.bats){
+sigma[i] ~ dunif(1,sigma.max) #Variance in torpor bout length
+tau[i] <- 1/sigma[i]^2
+}
+for(i in 1:4){
+  beta[i] ~ dnorm(0,1) #Uninformative priors to determine pi
+}
+for(i in 1:4){
+  g[i] ~ dnorm(0,1/10) # Uninformative priors to determine rho
+}
+sigma.rho ~ dunif(0,0.5)
+
+#Estimate population values using literature priors
+mu.C.t ~ dunif(0.01,0.2)
+sigma.C.t ~ dunif(0.001,0.05)
+mu.rEWL.body ~ dgamma(0.1^2/0.1^2,0.1/0.1^2)
+sigma.rEWL.body ~ dunif(0.001,0.1)
+mu.t.tor.max ~ dunif(max.bout,1000)
+sigma.t.tor.max ~ dunif(0.001,100)
+mu.T.tor.min ~ dunif(0.5,5)
+sigma.T.tor.min ~ dunif(0.001,1)
+mu.TMR.min ~ dunif(0.01,0.2)
+sigma.TMR.min ~ dunif(0.001,0.1)
+
+#Estimate individual values as draws from population
+for(i in 1:n.bats){
+  C.t[i] ~ dgamma(mu.C.t^2/sigma.C.t^2,mu.C.t/sigma.C.t^2)
+  rEWL.body[i] ~ dgamma(mu.rEWL.body^2/sigma.rEWL.body^2,mu.rEWL.body/sigma.rEWL.body^2)
+  t.tor.max[i] ~ dgamma(mu.t.tor.max^2/sigma.t.tor.max^2,mu.t.tor.max/sigma.t.tor.max^2)
+  T.tor.min[i] ~ dgamma(mu.T.tor.min^2/sigma.T.tor.min^2,mu.T.tor.min/sigma.T.tor.min^2)
+  TMR.min[i] ~ dgamma(mu.TMR.min^2/sigma.TMR.min^2,mu.TMR.min/sigma.TMR.min^2)
+}
+
+#Fixed parameter values
+
+C <- 0.2
+percent.fat <- 0.3
+S <- 0.131
+T.eu <- 37
+WR <- 90
+
+
+#parameters calculated based on other parameters
+
+
+for(i in 1:n.bats){
+rEWL.wing[i] <- rEWL.body[i]*0.33/0.1
+
+M.fat[i] <- M.body[i]*percent.fat
+M.lean[i] <- M.body[i] - M.fat[i] #total body mass
+
+SA.body[i] <- 10*M.body[i]^(2/3) #body surface area
+SA.wing[i] <- SA.body[i]*19.68/39.36 #wing surface area, per Haase2019
+}
+
+#average values
+mu.rEWL.wing <- mu.rEWL.body*0.33/0.1
+
+#Model structure
+
+#first bat
+for(j in 1:n.bouts[1]){
+
+  T.tor[j] <- max(T.a[j],T.tor.min[1])
+  Q10[j] <- 1.6+0.26*T.a[j]-0.006*T.a[j]^2
+  
+  t.cool[j] <- (log(T.eu-T.tor[j])/log(10))/(C*M.body[1]^0.67*(log(T.eu-T.a[j])/log(10))/(S*M.body[1]))
+  t.warm[j] <- (T.eu-T.a[j])/WR
+
+  mu.bout.length.Hayman[j] <- ifelse(T.a[j]<=T.tor.min[1], t.tor.max[1]/(1+(T.tor.min[1]-T.a[j])*(C.t[1]/TMR.min[1])),       t.tor.max[1]/Q10[j]^((T.a[j]-T.tor.min[1])/10))
+  
+  WVP.bat[j] <- .611*exp((17.503*T.tor[j])/(T.tor[j]+240.97))
+  d.WVP[j] <- max(0.0001, WVP.bat[j]-WVP.a[j])
+  
+  mu.bout.length.WVP[j] <- 0.027*M.lean[1]*1000/(((SA.body[1]*rEWL.body[1]+SA.wing[1]*rEWL.wing[1])*d.WVP[j]) + ((TMR.min[1]*M.body[1]/(0.2095*0.30*10^3))*(d.WVP[j]/(.46152*(273.15+T.a[j])))))
+    
+  mu.bout.length.Haase[j] <- min(mu.bout.length.WVP[j], mu.bout.length.Hayman[j])
+    
+}
+
+#subsequent bats
+for(i in 2:n.bats){
+  for(j in 1:n.bouts[i]){
+    T.tor[sum(n.bouts[1:(i-1)])+j] <- max(T.a[sum(n.bouts[1:(i-1)])+j],T.tor.min[i])
+    Q10[sum(n.bouts[1:(i-1)])+j] <- 1.6+0.26*T.a[sum(n.bouts[1:(i-1)])+j]-0.006*T.a[sum(n.bouts[1:(i-1)])+j]^2
+    
+    t.cool[sum(n.bouts[1:(i-1)])+j] <- (log(T.eu-T.tor[sum(n.bouts[1:(i-1)])+j])/log(10))/(C*M.body[i]^0.67*(log(T.eu-T.a[sum(n.bouts[1:(i-1)])+j])/log(10))/(S*M.body[i])) 
+    t.warm[sum(n.bouts[1:(i-1)])+j] <- (T.eu-T.a[sum(n.bouts[1:(i-1)])+j])/WR
+    
+    mu.bout.length.Hayman[sum(n.bouts[1:(i-1)])+j] <- ifelse(T.a[sum(n.bouts[1:(i-1)])+j]<=T.tor.min[i],           t.tor.max[i]/(1+(T.tor.min[i]-T.a[sum(n.bouts[1:(i-1)])+j])*(C.t[i]/TMR.min[i])),                   t.tor.max[i]/Q10[sum(n.bouts[1:(i-1)])+j]^((T.a[sum(n.bouts[1:(i-1)])+j]-T.tor.min[i])/10))
+    
+    WVP.bat[sum(n.bouts[1:(i-1)])+j] <- .611*exp((17.503*T.tor[sum(n.bouts[1:(i-1)])+j])/(T.tor[sum(n.bouts[1:(i-1)])+j]+240.97))
+    d.WVP[sum(n.bouts[1:(i-1)])+j] <- max(0.001, WVP.bat[sum(n.bouts[1:(i-1)])+j]-WVP.a[sum(n.bouts[1:(i-1)])+j])
+    
+    mu.bout.length.WVP[sum(n.bouts[1:(i-1)])+j] <- 0.027*M.lean[i]*1000/(((SA.body[i]*rEWL.body[i]+SA.wing[i]*rEWL.wing[i])*d.WVP[sum(n.bouts[1:(i-1)])+j]) + ((TMR.min[i]*M.body[i]/(0.2095*0.30*10^3))*(d.WVP[sum(n.bouts[1:(i-1)])+j]/(.46152*(273.15+T.a[sum(n.bouts[1:(i-1)])+j])))))
+    
+    
+    mu.bout.length.Haase[sum(n.bouts[1:(i-1)])+j] <- min(mu.bout.length.Hayman[sum(n.bouts[1:(i-1)])+j], mu.bout.length.WVP[sum(n.bouts[1:(i-1)])+j])
+
+
+  }
+}
+
+#first bat
+for(j in 1:n.bouts[1]){
+    
+    #Combine models with weighted average 
+    #phenomenologically dependent on environment
+    
+    pi[j] <- exp(beta[1]+beta[2]*T.a[j]+beta[3]*d.WVP[j]+beta[4]*T.a[j]*d.WVP[j])/ (1+exp(beta[1]+beta[2]*T.a[j]+beta[3]*d.WVP[j]+beta[4]*T.a[j]*d.WVP[j]))
+    mu.bout.length[j] <- t.cool[j] + (pi[j]*mu.bout.length.Hayman[j] + (1-pi[j])*mu.bout.length.Haase[j]) + t.warm[j]
+    
+    
+    #Calculate environment-dependent proportion of torpor bout length used
+    
+    a[j] <- exp(g[1]+g[2]*T.a.scale[j]+g[3]*d.WVP[j]+g[4]*T.a.scale[j]*d.WVP[j])/ (1+exp(g[1]+g[2]*T.a[j]+g[3]*d.WVP[j]+g[4]*T.a.scale[j]*d.WVP[j]))
+    rho[j] ~ dbeta((a[j]^2-a[j]^3-a[j]*sigma.rho^2)/sigma.rho^2, (a[j]-2*a[j]^2+a[j]^3-sigma.rho^2+a[j]*sigma.rho^2)/sigma.rho^2) T(0.0001,0.9999)
+    
+    bout.length[j] ~ dgamma((rho[j]*mu.bout.length[j])^2/sigma[1]^2, (rho[j]*mu.bout.length[j])/sigma[1]^2)
+    
+    #Prediction
+    rho.pred[j] ~ dbeta((a[j]^2-a[j]^3-a[j]*sigma.rho^2)/sigma.rho^2, (a[j]-2*a[j]^2+a[j]^3-sigma.rho^2+a[j]*sigma.rho^2)/sigma.rho^2) T(0.0001,0.9999)
+    bout.length.pred[j]  ~ dgamma((rho.pred[j]*mu.bout.length[j])^2/sigma[1]^2, (rho.pred[j]*mu.bout.length[j])/sigma[1]^2)
+}
+
+mean.bat[1] <- mean(bout.length.pred[1:n.bouts[1]])
+var.bat[1] <- sd(bout.length.pred[1:n.bouts[1]])^2
+
+#Measure total hibernation length
+for(j in 1:(n.bouts[1])){
+  t.eu[j] ~ dgamma(mu.eu^2/sd.eu^2, mu.eu/sd.eu^2)
+}
+
+t.hib.pred[1] <- sum(bout.length.pred[1:n.bouts[1]])+sum(t.eu[1:n.bouts[1]])
+
+#subsequent bats
+for(i in 2:n.bats){
+  for(j in 1:n.bouts[i]){
+
+
+
+    #Combine models with weighted average 
+    #phenomenologically dependent on environment
+    
+    pi[sum(n.bouts[1:(i-1)])+j] <- exp(beta[1]+beta[2]*T.a[sum(n.bouts[1:(i-1)])+j]+beta[3]*d.WVP[sum(n.bouts[1:(i-1)])+j]+beta[4]*T.a[sum(n.bouts[1:(i-1)])+j]*d.WVP[sum(n.bouts[1:(i-1)])+j])/ (1+exp(beta[1]+beta[2]*T.a[sum(n.bouts[1:(i-1)])+j]+beta[3]*d.WVP[sum(n.bouts[1:(i-1)])+j]+beta[4]*T.a[sum(n.bouts[1:(i-1)])+j]*d.WVP[sum(n.bouts[1:(i-1)])+j]))
+    mu.bout.length[sum(n.bouts[1:(i-1)])+j] <- t.cool[sum(n.bouts[1:(i-1)])+j] +  (pi[sum(n.bouts[1:(i-1)])+j]*mu.bout.length.Hayman[sum(n.bouts[1:(i-1)])+j] + (1-pi[sum(n.bouts[1:(i-1)])+j])*mu.bout.length.Haase[sum(n.bouts[1:(i-1)])+j]) + t.warm[sum(n.bouts[1:(i-1)])+j]
+    
+    
+    #Calculate environment-dependent proportion of torpor bout length used
+    
+    a[sum(n.bouts[1:(i-1)])+j] <- exp(g[1]+g[2]*T.a.scale[sum(n.bouts[1:(i-1)])+j]+g[3]*d.WVP[sum(n.bouts[1:(i-1)])+j]+g[4]*T.a.scale[sum(n.bouts[1:(i-1)])+j]*d.WVP[sum(n.bouts[1:(i-1)])+j])/ (1+exp(g[1]+g[2]*T.a[sum(n.bouts[1:(i-1)])+j]+g[3]*d.WVP[sum(n.bouts[1:(i-1)])+j]+g[4]*T.a.scale[sum(n.bouts[1:(i-1)])+j]*d.WVP[sum(n.bouts[1:(i-1)])+j]))
+    rho[sum(n.bouts[1:(i-1)])+j] ~ dbeta((a[sum(n.bouts[1:(i-1)])+j]^2-a[sum(n.bouts[1:(i-1)])+j]^3-a[sum(n.bouts[1:(i-1)])+j]*sigma.rho^2)/sigma.rho^2, (a[sum(n.bouts[1:(i-1)])+j]-2*a[sum(n.bouts[1:(i-1)])+j]^2+a[sum(n.bouts[1:(i-1)])+j]^3-sigma.rho^2+a[sum(n.bouts[1:(i-1)])+j]*sigma.rho^2)/sigma.rho^2) T(0.0001,0.9999)
+    
+    bout.length[sum(n.bouts[1:(i-1)])+j] ~ dgamma((rho[sum(n.bouts[1:(i-1)])+j]*mu.bout.length[sum(n.bouts[1:(i-1)])+j])^2/sigma[i]^2, (rho[sum(n.bouts[1:(i-1)])+j]*mu.bout.length[sum(n.bouts[1:(i-1)])+j])/sigma[i]^2)
+    
+    #Prediction
+    rho.pred[sum(n.bouts[1:(i-1)])+j] ~ dbeta((a[sum(n.bouts[1:(i-1)])+j]^2-a[sum(n.bouts[1:(i-1)])+j]^3-a[sum(n.bouts[1:(i-1)])+j]*sigma.rho^2)/sigma.rho^2, (a[sum(n.bouts[1:(i-1)])+j]-2*a[sum(n.bouts[1:(i-1)])+j]^2+a[sum(n.bouts[1:(i-1)])+j]^3-sigma.rho^2+a[sum(n.bouts[1:(i-1)])+j]*sigma.rho^2)/sigma.rho^2) T(0.0001,0.9999)
+    bout.length.pred[sum(n.bouts[1:(i-1)])+j]  ~ dgamma((rho.pred[sum(n.bouts[1:(i-1)])+j]*mu.bout.length[sum(n.bouts[1:(i-1)])+j])^2/sigma[i]^2, (rho.pred[sum(n.bouts[1:(i-1)])+j]*mu.bout.length[sum(n.bouts[1:(i-1)])+j])/sigma[i]^2)
+  }
+  
+  mean.bat[i] <- mean(bout.length.pred[(sum(n.bouts[1:(i-1)])+1):sum(n.bouts[1:i])])
+var.bat[i] <- sd(bout.length.pred[(sum(n.bouts[1:(i-1)])+1):sum(n.bouts[1:i])])^2
+
+#Random draw for euthermic time periods
+for(j in 1:(n.bouts[i])){
+  t.eu[sum(n.bouts[1:(i-1)])+j] ~ dgamma(mu.eu^2/sd.eu^2, mu.eu/sd.eu^2)
+}
+
+#Measure total hibernation length
+t.hib.pred[i] <- sum(bout.length.pred[(sum(n.bouts[1:(i-1)])+1):sum(n.bouts[1:i])])+sum(t.eu[(sum(n.bouts[1:(i-1)])+1):sum(n.bouts[1:i])])
+  
+}
+
+
+
+
+
+mean.all <- mean(bout.length.pred[1:length(bout.length.pred)])
+var.all <- sd(bout.length.pred[1:length(bout.length.pred)])^2
+
+#Population expected upper limit
+for(j in 1:length(T.a)){
+
+  T.tor.mu[j] <- max(T.a[j],mu.T.tor.min)
+  
+  t.cool.mu[j] <- (log(T.eu-T.tor.mu[j])/log(10))/(C*M.body[1]^0.67*(log(T.eu-T.a[j])/log(10))/(S*M.body[1]))
+
+  mu.bout.length.Hayman.mu[j] <- ifelse(T.a[j]<=mu.T.tor.min, mu.t.tor.max/(1+(mu.T.tor.min-T.a[j])*(mu.C.t/mu.TMR.min)),       mu.t.tor.max/Q10[j]^((T.a[j]-mu.T.tor.min)/10))
+  
+  WVP.bat.mu[j] <- .611*exp((17.503*T.tor.mu[j])/(T.tor.mu[j]+240.97))
+  d.WVP.mu[j] <- max(0.0001, WVP.bat.mu[j]-WVP.a[j])
+  
+  mu.bout.length.WVP.mu[j] <- 0.027*M.lean[1]*1000/(((SA.body[1]*mu.rEWL.body+SA.wing[1]*mu.rEWL.wing)*d.WVP.mu[j]) + ((mu.TMR.min*M.body[1]/(0.2095*0.30*10^3))*(d.WVP.mu[j]/(.46152*(273.15+T.a[j])))))
+    
+  mu.bout.length.Haase.mu[j] <- min(mu.bout.length.WVP.mu[j], mu.bout.length.Hayman.mu[j])
+  mu.bout.length.pop[j] <- t.cool.mu[j] + (pi[j]*mu.bout.length.Hayman.mu[j] + (1-pi[j])*mu.bout.length.Haase.mu[j]) + t.warm[j] 
+  bout.length.pop[j] <- rho.pred[j]*mu.bout.length.pop[j]
+}
+
+mean.pop <- mean(bout.length.pop[1:length(bout.length.pop)])
+var.pop <- sd(bout.length.pop[1:length(bout.length.pop)])^2
+
+
+}
+", fill=TRUE)
+sink()
+}
+```
+
+```{r input actual data into guided underperformance ensemble model for bat 1}
+#######################################
+# Run JAGS model
+#######################################
+
+
+#Data and initial values
+library(rjags)
+
+n.bouts <- c(length(E1[,1]),length(E2[,1]),length(E3[,1]))
+df <- rbind(E1,E2,E3)
+df <- as.data.frame(cbind(df$t.bat,df$T.bat,df$WVP.bat,c(rep(1,n.bouts[1]),rep(2,n.bouts[2]),rep(3,n.bouts[3]))))
+colnames(df) <- c("bout.length","T.a","WVP.a","index.bat")
+# df <- df[which(df$bout.length<=400),]
+n.bouts <- c(length(which(df$index.bat==1)),length(which(df$index.bat==2)),length(which(df$index.bat==3)))
+t.hib <- c(E1$Euthermic[nrow(E1)],E2$Euthermic[nrow(E2)],E3$Euthermic[nrow(E3)])
+t.eu <- rbind(c(E1$Euthermic[-nrow(E1)],E2$Euthermic[-nrow(E2)],E3$Euthermic[-nrow(E3)]))
+t.euth <- c(sum(E1$Euthermic[-nrow(E1)]), sum(E2$Euthermic[-nrow(E2)]), sum(E3$Euthermic[-nrow(E3)]))
+M.body <- c(20,20,20)
+max.bout <- max(df$bout.length)
+
+data = list(
+  T.a = df$T.a,
+  WVP.a = df$WVP.a,
+  M.body = M.body, 
+  bout.length = df$bout.length,
+  all.bout.length = df$bout.length,
+  n.bats = length(unique(df$index.bat)),
+  n.bouts = n.bouts,
+  max.bout = max.bout,
+  sigma.max = 50,
+  T.a.scale = (df$T.a-mean(df$T.a))/sd(df$T.a),
+  mu.eu = mean(t.eu),
+  sd.eu = sd(t.eu)
+)
+
+inits = list(
+  list(
+    sigma.rho = 0.1
+  ),
+  list(
+    sigma.rho = 0.2
+  )
+)
+
+n.adapt=10000
+n.update=20000
+n.iter=20000
+
+jm.Ens.ind=jags.model("BoutLengthEnsembleGuidedUnderperformancePopulationToIndividual.R",data=data, inits=inits,n.chains=length(inits),n.adapt=n.adapt)
+update(jm.Ens.ind,n.iter=n.update)
+zm.Ens.ind=coda.samples(jm.Ens.ind, variable.names=c("sigma",
+                                                 "C.t",
+                                                 "rEWL.body",
+                                                 "t.tor.max",
+                                                 "T.tor.min",
+                                                 "TMR.min",
+                                             "beta",
+                                             "g",
+                                             "mu.C.t",
+                                             "sigma.C.t",
+                                             "mu.rEWL.body",
+                                             "sigma.rEWL.body",
+                                             "mu.t.tor.max",
+                                             "sigma.t.tor.max",
+                                             "mu.T.tor.min",
+                                             "sigma.T.tor.min",
+                                             "mu.TMR.min",
+                                             "sigma.TMR.min"),n.iter=n.iter,n.thin=10)
+
+zj.Ens.ind=jags.samples(jm.Ens.ind, variable.names=c("sigma",
+                                                 "C.t",
+                                                 "rEWL.body",
+                                                 "t.tor.max",
+                                                 "T.tor.min",
+                                                 "TMR.min",
+                                                 "bout.length.pred",
+                                                 "pi",
+                                             "beta",
+                                             "g",
+                                             "mu.bout.length",
+                                             "mean.bat",
+                                             "var.bat",
+                                             "mean.all",
+                                             "var.all",
+                                             "t.hib.pred",
+                                             "mu.C.t",
+                                             "sigma.C.t",
+                                             "mu.rEWL.body",
+                                             "sigma.rEWL.body",
+                                             "mu.t.tor.max",
+                                             "sigma.t.tor.max",
+                                             "mu.T.tor.min",
+                                             "sigma.T.tor.min",
+                                             "mu.TMR.min",
+                                             "sigma.TMR.min",
+                                             "mu.bout.length.pop",
+                                             "bout.length.pop",
+                                             "mean.pop",
+                                             "var.pop"),n.iter=n.iter,n.thin=10)
+
+plot(zm.Ens.ind)
+summary(zm.Ens.ind)
+parm.Ens <- as.data.frame(do.call(rbind,zm.Ens.ind))
+write.csv2(x = as.data.frame(parm.Ens), file = "EnsembleGuidedUmbrellaPopulationToIndividual.csv")
+dic.Ens.ind <- dic.samples(jm.Ens.ind, n.iter=20000, thin=10, type="pD")
+dic.Ens.ind
+
+```
+
+```{r visualize guided underperformance ensemble results bat 1}
+
+###############################################################
+# Generate plotting environment for visualization
+# Commented out graphs are not those used directly in manuscript
+###############################################################
+T.tor.min <- summary(zj.Ens.ind$T.tor.min, mean)$stat
+df.Ens <- cbind(df, 
+                t(summary(zj.Ens.ind$bout.length.pred, quantile, c(0.025, 0.5, 0.975))$stat), 
+                summary(zj.Ens.ind$bout.length.pred, mean)$stat,
+                summary(zj.Ens.ind$bout.length.pred, quantile, 0.5)$stat - df$bout.length,
+                t(summary(zj.Ens.ind$mu.bout.length, quantile, c(0.025, 0.5, 0.975))$stat),
+                summary(zj.Ens.ind$mu.bout.length, mean)$stat,
+                t(summary(zj.Ens.ind$mu.bout.length.pop, quantile, c(0.025, 0.5, 0.975))$stat),
+                summary(zj.Ens.ind$mu.bout.length.pop, mean)$stat
+                )
+d.WVP.model <- rep(NA,length(df.Ens$T.a))
+Hayman.model <- rep(NA,length(df.Ens$T.a))
+Haase.model <- rep(NA,length(df.Ens$T.a))
+for(i in 1:n.bouts[1]){
+d.WVP.model[i] <- max(.611*exp((17.503*max(df.Ens$T.a[i],T.tor.min[1]))/(max(df.Ens$T.a[i],T.tor.min[1])+240.97))-df.Ens$WVP.a[i],0.001)
+#Calculate model expectations given original parameters
+    T.tor <- max(df.Ens$T.a[i],3.5)
+    Q10 <- 1.6+0.26*df.Ens$T.a[i]-0.006*df.Ens$T.a[i]^2
+    
+    t.cool <- (log(35.8-T.tor)/log(10))/(C*M.body[1]^0.67*(log(35.8-df.Ens$T.a[i])/log(10))/(S*M.body[1])) 
+    t.warm <- (35.8-df.Ens$T.a[i])/WR
+    
+    mu.bout.length.Hayman <- ifelse(df.Ens$T.a[i]<=3.5,           792/(1+(3.5-df.Ens$T.a[i])*(.055/0.028)),                   792/Q10^((df.Ens$T.a[i]-3.5)/10))
+    Hayman.model[i] <- (t.cool+t.warm+mu.bout.length.Hayman)/24
+    
+    
+    mu.bout.length.WVP.mu <- 0.027*M.body[1]*percent.fat*1000/(((SA.body[1]*rEWL.body+SA.wing[1]*rEWL.wing)*delta*d.WVP.model[i]) + ((TMR.min*M.body[1]/(0.2095*0.30*10^3))*(d.WVP.model[i]/(.46152*(273.15+df.Ens$T.a[i])))))
+    
+  Haase.model[i] <- (t.cool+min(mu.bout.length.WVP.mu, mu.bout.length.Hayman)+t.warm)/24
+  
+    
+}
+for(i in 2:length(M.body)){
+for(j in 1:n.bouts[i]){
+d.WVP.model[sum(n.bouts[1:(i-1)])+j] <- max(.611*exp((17.503*max(df.Ens$T.a[sum(n.bouts[1:(i-1)])+j],T.tor.min[i]))/(max(df.Ens$T.a[sum(n.bouts[1:(i-1)])+j],T.tor.min[i])+240.97))-df.Ens$WVP.a[sum(n.bouts[1:(i-1)])+j],0.001)
+
+    T.tor <- max(df.Ens$T.a[sum(n.bouts[1:(i-1)])+j],3.5)
+    Q10 <- 1.6+0.26*df.Ens$T.a[sum(n.bouts[1:(i-1)])+j]-0.006*df.Ens$T.a[sum(n.bouts[1:(i-1)])+j]^2
+    
+    t.cool <- (log(35.8-T.tor)/log(10))/(C*M.body[i]^0.67*(log(35.8-df.Ens$T.a[sum(n.bouts[1:(i-1)])+j])/log(10))/(S*M.body[i])) 
+    t.warm <- (35.8-df.Ens$T.a[sum(n.bouts[1:(i-1)])+j])/WR
+    
+    mu.bout.length.Hayman <- ifelse(df.Ens$T.a[sum(n.bouts[1:(i-1)])+j]<=3.5,           792/(1+(3.5-df.Ens$T.a[sum(n.bouts[1:(i-1)])+j])*(.055/0.028)),                   792/Q10^((df.Ens$T.a[sum(n.bouts[1:(i-1)])+j]-3.5)/10))
+    Hayman.model[sum(n.bouts[1:(i-1)])+j] <- (t.cool+t.warm+mu.bout.length.Hayman)/24
+    
+    mu.bout.length.WVP.mu <- 0.027*M.body[i]*percent.fat*1000/((delta*(SA.body[i]*rEWL.body+SA.wing[i]*rEWL.wing)*delta*d.WVP.model[sum(n.bouts[1:(i-1)])+j]) + ((TMR.min*M.body[i]/(0.2095*0.30*10^3))*(d.WVP.model[sum(n.bouts[1:(i-1)])+j]/(.46152*(273.15+df.Ens$T.a[sum(n.bouts[1:(i-1)])+j])))))
+    
+  Haase.model[sum(n.bouts[1:(i-1)])+j] <- (t.cool+min(mu.bout.length.WVP.mu, mu.bout.length.Hayman)+t.warm)/24
+}
+}
+
+df.Ens <- cbind(df.Ens, d.WVP.model, Hayman.model, Haase.model)
+colnames(df.Ens)[c(5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20)] <- c("Low","bout.length.pred","High","Mean.bout","Residual","low.mu","mu.bout.length","high.mu","mean.mu.ind","low.pop","mid.pop","high.pop","mean.mu.pop","d.WVP","Hayman.model","Haase.model")
+
+# ggplot(df.Ens) + theme_classic() +
+#   xlab("Temperature (C)") + ylab("Time (Days)") +
+#   geom_line(aes(x=T.a,y=Hayman.model),color="black",linetype=2, size=1) +
+#   geom_ribbon(aes(x=T.a,ymin=low.mu/24,ymax=high.mu/24),color="#D8AF39", alpha=0.3)+
+#   geom_ribbon(aes(x=T.a,ymin=low.pop/24,ymax=high.pop/24),color="#E8C4A2", alpha=0.3)+
+#   geom_errorbar(aes(x=T.a,ymin=Low/24,ymax=High/24), color="#E75B64")  +
+#   geom_line(aes(T.a, mean.mu.ind/24), color="#D8AF39", size=1.5) +
+#   geom_line(aes(T.a, mean.mu.pop/24), color="#E8C4A2", size=1.5) +
+#   geom_point(aes(T.a,Mean.bout/24), color="#E75B64", size=3)   +
+#   geom_point(aes(T.a,bout.length/24), color="#278B9A", size=3) +
+#   scale_color_manual(values=c("#278B9A","#E75B64","#D8AF39","#E8C4A2"), 
+#                      labels=c("Measurement","Prediction (95% CI)","Physiological limits\npopulation (95% CI)","Physiological limits\nindividual (95% CI)"))
+
+# ggplot(df.Ens) + theme_classic() +
+#   xlab("Water Vapor Pressure deficit (kPa)") + ylab("Time (Days)") +
+#   geom_line(aes(x=d.WVP,y=Haase.model),color="black",linetype=2, size=1) +
+#   geom_ribbon(aes(x=d.WVP,ymin=low.mu/24,ymax=high.mu/24),color="#D8AF39", alpha=0.3)+
+#   geom_ribbon(aes(x=d.WVP,ymin=low.pop/24,ymax=high.pop/24),color="#E8C4A2", alpha=0.3)+
+#   geom_errorbar(aes(x=d.WVP,ymin=Low/24,ymax=High/24), color="#E75B64")  +
+#   geom_line(aes(d.WVP, mean.mu.ind/24), color="#D8AF39", size=1.5) +
+#   geom_line(aes(d.WVP, mean.mu.pop/24), color="#E8C4A2", size=1.5) +
+#   geom_point(aes(d.WVP,Mean.bout/24), color="#E75B64", size=3)   +
+#   geom_point(aes(d.WVP,bout.length/24), color="#278B9A", size=3) +
+#   scale_color_manual(values=c("#278B9A","#E75B64","#D8AF39","#E8C4A2"), 
+#                      labels=c("Measurement","Prediction (95% CI)","Physiological limits\npopulation (95% CI)","Physiological limits\nindividual (95% CI)"))
+
+
+for(i in 1:length(M.body)){
+  
+  df.Ens.bat <- df.Ens[which(df.Ens$index.bat==i),]
+
+p1 <- ggplot(df.Ens.bat) + ggtitle("Bat 1") +
+  xlab("Measured bout length") + ylab("Estimated bout length") +
+  geom_point(aes(bout.length,bout.length.pred)) +
+  geom_errorbar(aes(x=bout.length,ymin=Low,ymax=High)) +
+  geom_abline(intercept=0, slope=1) +
+  geom_point(aes(bout.length,Mean.bout), color="red")
+
+p2 <- ggplot(df.Ens.bat) + theme_classic() +
+  xlab("Temperature (C)") + ylab("Time (Days)") +
+  geom_ribbon(aes(x=T.a,ymin=low.mu/24,ymax=high.mu/24),color="#D8AF39", alpha=0.3)+
+  geom_errorbar(aes(x=T.a,ymin=Low/24,ymax=High/24), color="#E75B64")  +
+  geom_line(aes(T.a, mean.mu.ind/24), color="#D8AF39", size=2) +
+  geom_point(aes(T.a,Mean.bout/24), color="#E75B64", size=3)   +
+  geom_point(aes(T.a,bout.length/24), color="#278B9A", size=3) +
+  scale_color_manual(values=c("#E75B64","#278B9A","#5A6F80"), 
+                     labels=c("Measurement","Prediction (95% CI)","Physiological model\noutput (95% CI)"))
+
+p3 <- ggplot(df.Ens.bat) + theme_classic() +
+  xlab("Water Vapor Pressure deficit (kPa)") + ylab("Time (Days)") +
+  geom_ribbon(aes(x=d.WVP,ymin=low.mu/24,ymax=high.mu/24),color="#D8AF39", alpha=0.3)+
+  geom_errorbar(aes(x=d.WVP,ymin=Low/24,ymax=High/24), color="#E75B64")  +
+  geom_line(aes(d.WVP, mean.mu.ind/24), color="#D8AF39", size=2) +
+  geom_point(aes(d.WVP,Mean.bout/24), color="#E75B64", size=3)   +
+  geom_point(aes(d.WVP,bout.length/24), color="#278B9A", size=3) +
+  scale_color_manual(values=c("#E75B64","#278B9A","#5A6F80"), 
+                     labels=c("Measurement","Prediction (95% CI)","Physiological model\noutput (95% CI)"))
+
+
+
+beta <- summary(zj.Ens.ind$beta, mean)$stat
+T.beta <- seq(-3,20,by = 0.2)
+RH.beta <- seq(0,1,by=0.02)
+df.pi <- NA
+for(i in 1:length(T.beta)){
+  for(j in 1:length(RH.beta)){
+    WVP.beta <- .611*exp((17.503*T.beta[i])/(T.beta[i]+240.97))*RH.beta[j]
+    d.WVP.beta <- max(.611*exp((17.503*max(T.beta[i],T.tor.min))/(max(T.beta[i],T.tor.min)+240.97))-WVP.beta,0)
+    pi <- exp(beta[1]+beta[2]*T.beta[i]+beta[3]*d.WVP.beta+beta[4]*T.beta[i]*d.WVP.beta)/ (1+exp(beta[1]+beta[2]*T.beta[i]+beta[3]*d.WVP.beta+beta[4]*T.beta[i]*d.WVP.beta))
+    df.pi <- rbind(df.pi, c(T.beta[i], RH.beta[j], d.WVP.beta,pi))
+  }
+}
+df.pi <- as.data.frame(df.pi[-1,])
+colnames(df.pi) <- c("T.a","RH","d.WVP","pi")
+
+p4 <- ggplot(df.pi, aes(T.a,d.WVP,color=pi)) + xlab("Temperature") +
+  ylab("Water vapor deficit") +theme_classic() +
+  scale_color_viridis_c(option="viridis", limits=c(0,1)) +
+  geom_point() +
+  geom_point(data=df.Ens.bat, aes(T.a,d.WVP, size=abs(Residual)), color="blue")
+
+# print(plot_grid(p1,p2,p3,p4,ncol=2))
+
+}
+```
+
+
+```{r compare parameters for all bats and three different bats}
+library(cowplot)
+
+df.parm <- rbind(c(summary(zj.Ens.ind$mu.C.t, quantile, c(0.025,0.5,0.975))$stat, "All bats", "Torpor conductance\n(ml O2/gC)","Population Model"),
+                 c(t(summary(zj.Ens.ind$C.t, quantile, c(0.025,0.5,0.975))$stat)[1,], "Bat1", "Torpor conductance\n(ml O2/gC)","Individual Model"),
+                 c(t(summary(zj.Ens.ind$C.t, quantile, c(0.025,0.5,0.975))$stat)[2,], "Bat2", "Torpor conductance\n(ml O2/gC)","Individual Model"),
+                 c(t(summary(zj.Ens.ind$C.t, quantile, c(0.025,0.5,0.975))$stat)[3,], "Bat3", "Torpor conductance\n(ml O2/gC)","Individual Model"),
+                 c(summary(zj.Ens.ind$mu.T.tor.min, quantile, c(0.025,0.5,0.975))$stat, "All bats", "Min. torpor temp.\n(C)","Population Model"),
+                 c(t(summary(zj.Ens.ind$T.tor.min, quantile, c(0.025,0.5,0.975))$stat)[1,], "Bat1", "Min. torpor temp.\n(C)","Individual Model"),
+                 c(t(summary(zj.Ens.ind$T.tor.min, quantile, c(0.025,0.5,0.975))$stat)[2,], "Bat2", "Min. torpor temp.\n(C)","Individual Model"),
+                 c(t(summary(zj.Ens.ind$T.tor.min, quantile, c(0.025,0.5,0.975))$stat)[3,], "Bat3", "Min. torpor temp.\n(C)","Individual Model"),
+                 c(summary(zj.Ens.ind$mu.t.tor.max, quantile, c(0.025,0.5,0.975))$stat/24, "All bats", "Max. torpor length\n(Days)","Population Model"),
+                 c(t(summary(zj.Ens.ind$t.tor.max, quantile, c(0.025,0.5,0.975))$stat)[1,]/24, "Bat1", "Max. torpor length\n(Days)","Individual Model"),
+                 c(t(summary(zj.Ens.ind$t.tor.max, quantile, c(0.025,0.5,0.975))$stat)[2,]/24, "Bat2", "Max. torpor length\n(Days)","Individual Model"),
+                 c(t(summary(zj.Ens.ind$t.tor.max, quantile, c(0.025,0.5,0.975))$stat)[3,]/24, "Bat3", "Max. torpor length\n(Days)","Individual Model"),
+                 c(summary(zj.Ens.ind$mu.rEWL.body, quantile, c(0.025,0.5,0.975))$stat, "All bats", "Body evap. loss rate\n(mg/[hr*d.WVP*cm2])","Population Model"),
+                 c(t(summary(zj.Ens.ind$rEWL.body, quantile, c(0.025,0.5,0.975))$stat)[1,], "Bat1", "Body evap. loss rate\n(mg/[hr*d.WVP*cm2])","Individual Model"),
+                 c(t(summary(zj.Ens.ind$rEWL.body, quantile, c(0.025,0.5,0.975))$stat)[2,], "Bat2", "Body evap. loss rate\n(mg/[hr*d.WVP*cm2])","Individual Model"),
+                 c(t(summary(zj.Ens.ind$rEWL.body, quantile, c(0.025,0.5,0.975))$stat)[3,], "Bat3", "Body evap. loss rate\n(mg/[hr*d.WVP*cm2])","Individual Model"),
+                 #c(summary(zj.Ens$sigma, quantile, c(0.025,0.5,0.975))$stat, "All bats", "Torpor standard dev.","Population Model"),
+                 c(t(summary(zj.Ens.ind$sigma, quantile, c(0.025,0.5,0.975))$stat)[1,], "Bat1", "Torpor standard dev.","Individual Model"),
+                 c(t(summary(zj.Ens.ind$sigma, quantile, c(0.025,0.5,0.975))$stat)[2,], "Bat2", "Torpor standard dev.","Individual Model"),
+                 c(t(summary(zj.Ens.ind$sigma, quantile, c(0.025,0.5,0.975))$stat)[3,], "Bat3", "Torpor standard dev.","Individual Model"),
+                 c(summary(zj.Ens.ind$mu.TMR.min, quantile, c(0.025,0.5,0.975))$stat, "All bats", "Min. metabolic rate\n(mg O2/[g*hour])","Population Model"),
+                 c(t(summary(zj.Ens.ind$TMR.min, quantile, c(0.025,0.5,0.975))$stat)[1,], "Bat1", "Min. metabolic rate\n(mg O2/[g*hour])","Individual Model"),
+                 c(t(summary(zj.Ens.ind$TMR.min, quantile, c(0.025,0.5,0.975))$stat)[2,], "Bat2", "Min. metabolic rate\n(mg O2/[g*hour])","Individual Model"),
+                 c(t(summary(zj.Ens.ind$TMR.min, quantile, c(0.025,0.5,0.975))$stat)[3,], "Bat3", "Min. metabolic rate\n(mg O2/[g*hour])","Individual Model"),
+                 c(NA, 0.055, NA, "Lit.", "Torpor conductance\n(ml O2/gC)","Literature"),
+                 c(NA, 3.5, NA, "Lit.", "Min. torpor temp.\n(C)","Literature"),
+                 c(NA, 792/24, NA, "Lit.", "Max. torpor length\n(Days)","Literature"),
+                 c(NA, 0.1, NA, "Lit.", "Body evap. loss rate\n(mg/[hr*d.WVP*cm2])","Literature"),
+                 c(NA, 0.028, NA, "Lit.", "Min. metabolic rate\n(mg O2/[g*hour])","Literature"))
+
+colnames(df.parm) <- c("Low","Median","High","Bat","Parameter","Source")
+df.parm <- as.data.frame(df.parm)
+
+# 
+# ggplot(df.parm, aes(x=Bat, y=as.numeric(as.character(Median)))) + 
+#   theme_classic() +
+#   ylab(NULL) + xlab("") +
+#   geom_point(aes(color=Source, shape=Bat), size=5) +
+#   geom_errorbar(aes(ymin=as.numeric(as.character(Low)),ymax=as.numeric(as.character(High)), color=Source),width=0.2,position=position_dodge(0.5), size=1) +
+#   facet_wrap(~Parameter, strip.position = "left", scales="free") +
+#   theme(text = element_text(size=16), axis.text.x=element_text(angle=45, hjust=1),
+#         strip.background=element_blank(),
+#         strip.placement="outside") +
+#   scale_color_manual(values=c("#E75B64","black","#5A6F80")) +
+#   scale_shape_manual(values=c(16,15,17,18,13))
+
+
+
+
+n.bouts <- c(length(E1[,1]),length(E2[,1]),length(E3[,1]))
+df <- rbind(E1,E2,E3)
+df <- as.data.frame(cbind(df$t.bat,df$T.bat,df$WVP.bat,c(rep(1,n.bouts[1]),rep(2,n.bouts[2]),rep(3,n.bouts[3]))))
+colnames(df) <- c("bout.length","T.a","WVP.a","index.bat")
+
+df.moments.indmodels<- rbind(c(mean(df$bout.length),confint(lm(df$bout.length~1),level=0.95),"Mean","All bats","Data"),
+                   c(mean(df$bout.length[which(df$index.bat==1)]),confint(lm(df$bout.length[which(df$index.bat==1)]~1),level=0.95),"Mean","Bat1","Data"),
+                   c(mean(df$bout.length[which(df$index.bat==2)]),confint(lm(df$bout.length[which(df$index.bat==2)]~1),level=0.95),"Mean","Bat2","Data"),
+                   c(mean(df$bout.length[which(df$index.bat==3)]),confint(lm(df$bout.length[which(df$index.bat==3)]~1),level=0.95),"Mean","Bat3","Data"),
+                   c(var(df$bout.length),"NA", "NA","Variance","All bats","Data"),
+                   c(var(df$bout.length[which(df$index.bat==1)]),"NA","NA","Variance","Bat1","Data"),
+                   c(var(df$bout.length[which(df$index.bat==2)]),"NA","NA","Variance","Bat2","Data"),
+                   c(var(df$bout.length[which(df$index.bat==3)]),"NA","NA","Variance","Bat3","Data"),
+                   c(t.hib[1],"NA","NA","t.hibernation","Bat1","Data"),
+                   c(t.hib[2],"NA","NA","t.hibernation","Bat2","Data"),
+                   c(t.hib[3],"NA","NA","t.hibernation","Bat3","Data"),
+                   c(summary(zj.Ens.ind$mean.bat,mean)$stat[1], t(summary(zj.Ens.ind$mean.bat, quantile, c(0.025,0.975))$stat)[1,], "Mean","Bat1","Individual Parameters"),
+                   c(summary(zj.Ens.ind$mean.bat,mean)$stat[2], t(summary(zj.Ens.ind$mean.bat, quantile, c(0.025,0.975))$stat)[2,], "Mean","Bat2","Individual Parameters"),
+                   c(summary(zj.Ens.ind$mean.bat,mean)$stat[3], t(summary(zj.Ens.ind$mean.bat, quantile, c(0.025,0.975))$stat)[3,], "Mean","Bat3","Individual Parameters"),
+                   c(summary(zj.Ens.ind$var.bat,median)$stat[1], t(summary(zj.Ens.ind$var.bat, quantile, c(0.025,0.975))$stat)[1,], "Variance","Bat1","Individual Parameters"),
+                   c(summary(zj.Ens.ind$var.bat,median)$stat[2], t(summary(zj.Ens.ind$var.bat, quantile, c(0.025,0.975))$stat)[2,], "Variance","Bat2","Individual Parameters"),
+                   c(summary(zj.Ens.ind$var.bat,median)$stat[3], t(summary(zj.Ens.ind$var.bat, quantile, c(0.025,0.975))$stat)[3,], "Variance","Bat3","Individual Parameters"),
+                   c(summary(zj.Ens.ind$t.hib,mean)$stat[1], t(summary(zj.Ens.ind$t.hib, quantile, c(0.025,0.975))$stat)[1,], "t.hibernation","Bat1","Individual Parameters"),
+                   c(summary(zj.Ens.ind$t.hib,mean)$stat[2], t(summary(zj.Ens.ind$t.hib, quantile, c(0.025,0.975))$stat)[2,], "t.hibernation","Bat2","Individual Parameters"),
+                   c(summary(zj.Ens.ind$t.hib,mean)$stat[3], t(summary(zj.Ens.ind$t.hib, quantile, c(0.025,0.975))$stat)[3,], "t.hibernation","Bat3","Individual Parameters"),
+                   c(summary(zj.Ens.ind$mean.pop,mean)$stat, t(summary(zj.Ens.ind$mean.pop, quantile, c(0.025,0.975))$stat), "Mean","All bats","Shared Parameters"),
+                   c(summary(zj.Ens.ind$var.pop,mean)$stat, t(summary(zj.Ens.ind$var.pop, quantile, c(0.025,0.975))$stat), "Variance","All bats","Shared Parameters"))  
+
+colnames(df.moments.indmodels) <- c("Mean","Low","High","Moment","Individual","Model")
+df.moments.indmodels <- as.data.frame(df.moments.indmodels)
+
+
+
+
+p1 <- ggplot(df.moments.indmodels[which(df.moments.indmodels$Moment=="Mean"),], aes(x=Individual, y=as.numeric(as.character(Mean))/24)) + 
+  theme_classic() +
+  ylab("Mean torpor duration (Days)") + xlab("") +
+  geom_point(aes(color=Model, shape=Individual), size=5, position=position_dodge(width=0.65)) +
+  geom_errorbar(aes(ymin=as.numeric(as.character(Low))/24,ymax=as.numeric(as.character(High))/24, color=Model),width=0.5,size=1,position=position_dodge(0.65)) +
+  theme(text = element_text(size=12)) +
+  scale_color_manual(name="", values=c('#E75B64','#278B9A','#5A6F80'), labels=c('Observed','Individual parameterization','Population parameterization')) +
+  scale_shape_manual(values=c(16,15,17,18), guide="none")
+
+p2 <- ggplot(df.moments.indmodels[which(df.moments.indmodels$Moment=="Variance"),], aes(x=Individual, y=as.numeric(as.character(Mean))/24)) + 
+  theme_classic() +
+  ylab("Torpor duration variance") + xlab("") +
+  geom_point(aes(color=Model, shape=Individual), size=5, position=position_dodge(width=0.65)) +
+  geom_errorbar(aes(ymin=as.numeric(as.character(Low))/24,ymax=as.numeric(as.character(High))/24, color=Model),width=0.5,size=1,position=position_dodge(0.65)) +
+  theme(text = element_text(size=12),legend.position="none") +
+  scale_color_manual(name="", values=c('#E75B64','#278B9A','#5A6F80'), labels=c('Observed','Individual parameterization','Population parameterization')) +
+  scale_shape_manual(values=c(16,15,17,18))
+
+p3 <- ggplot(df.moments.indmodels[which(df.moments.indmodels$Moment=="t.hibernation"),], aes(x=Individual, y=as.numeric(as.character(Mean))/24)) + 
+  theme_classic() +
+  ylab("Hibernation duration (Days)") + xlab("") +
+  geom_point(aes(color=Model, shape=Individual), size=5, position=position_dodge(width=0.65)) +
+  geom_errorbar(aes(ymin=as.numeric(as.character(Low))/24,ymax=as.numeric(as.character(High))/24, color=Model),width=0.5,size=1,position=position_dodge(0.65)) +
+  theme(text = element_text(size=12),legend.position="none") +
+  scale_color_manual(name="", values=c('#E75B64','#278B9A','#5A6F80'), labels=c('Observed','Individual parameterization','Population parameterization')) +
+  scale_shape_manual(values=c(15,17,18))
+
+legend <- get_legend(p1)
+p1 <- p1+theme(legend.position="none")
+
+# plot_grid(p1,p2,p3, legend, ncol=2)
+```
+
+
+```{r plotting results}
+
+
+p1 <- ggplot(df.moments.indmodels[which(df.moments.indmodels$Moment=="Mean"),], aes(x=Individual, y=as.numeric(as.character(Mean))/24)) + 
+  theme_classic() +
+  ylab("Mean torpor duration (Days)") + xlab("") +
+  geom_point(aes(color=Model, shape=Individual), size=5, position=position_dodge(width=0.65)) +
+  geom_errorbar(aes(ymin=as.numeric(as.character(Low))/24,ymax=as.numeric(as.character(High))/24, color=Model),width=0.5,size=1,position=position_dodge(0.65)) +
+  theme(text = element_text(size=12)) +
+  scale_color_manual(name="", values=c('black','#E75B64','#278B9A'), labels=c('Observed','Individual parameterization','Population parameterization')) +
+  scale_shape_manual(values=c(16,15,17,18), guide="none")
+
+p2 <- ggplot(df.moments.indmodels[which(df.moments.indmodels$Moment=="Variance"),], aes(x=Individual, y=as.numeric(as.character(Mean))/24)) + 
+  theme_classic() +
+  ylab("Torpor duration variance") + xlab("") +
+  geom_point(aes(color=Model, shape=Individual), size=5, position=position_dodge(width=0.65)) +
+  geom_errorbar(aes(ymin=as.numeric(as.character(Low))/24,ymax=as.numeric(as.character(High))/24, color=Model),width=0.5,size=1,position=position_dodge(0.65)) +
+  theme(text = element_text(size=12),legend.position="none") +
+  scale_color_manual(name="", values=c('black','#E75B64','#278B9A'), labels=c('Observed','Individual parameterization','Population parameterization')) +
+  scale_shape_manual(values=c(16,15,17,18))
+
+p3 <- ggplot(df.moments.indmodels[which(df.moments.indmodels$Moment=="t.hibernation"),], aes(x=Individual, y=as.numeric(as.character(Mean))/24)) + 
+  theme_classic() +
+  ylab("Hibernation duration (Days)") + xlab("") +
+  geom_point(aes(color=Model, shape=Individual), size=5, position=position_dodge(width=0.65)) +
+  geom_errorbar(aes(ymin=as.numeric(as.character(Low))/24,ymax=as.numeric(as.character(High))/24, color=Model),width=0.5,size=1,position=position_dodge(0.65)) +
+  theme(text = element_text(size=12),legend.position="none") +
+  scale_color_manual(name="", values=c('black','#E75B64','#278B9A'), labels=c('Observed','Individual parameterization','Population parameterization')) +
+  scale_shape_manual(values=c(15,17,18))
+
+legend <- get_legend(p1)
+p1 <- p1+theme(legend.position="none")
+
+plot_grid(p1,p2,p3, legend, ncol=2)
+
+
+
+
+
+ggplot(df.parm, aes(x=Bat, y=as.numeric(as.character(Median)))) + 
+  theme_classic() +
+  ylab(NULL) + xlab("") +
+  geom_point(aes(color=Source, shape=Bat), size=5) +
+  geom_errorbar(aes(ymin=as.numeric(as.character(Low)),ymax=as.numeric(as.character(High)), color=Source),width=0.2,position=position_dodge(0.5), size=1) +
+  facet_wrap(~Parameter, strip.position = "left", scales="free") +
+  theme(text = element_text(size=16), axis.text.x=element_text(angle=45, hjust=1),
+        strip.background=element_blank(),
+        strip.placement="outside") +
+  scale_color_manual(values=c("#E75B64","black","#278B9A")) +
+  scale_shape_manual(values=c(16,15,17,18,13))
+
+
+
+#Torpor length plot for whole population
+library(reshape2)
+library(latex2exp)
+
+subdf <- melt(df.Ens, id.vars = c("T.a","d.WVP"), measure.vars=c("Mean.bout","bout.length"),variable.name="model")
+
+p.torpor.1 <- ggplot(subdf) + theme_classic() +
+  xlab("Temperature (C)") + ylab("Time (Days)") +
+  geom_ribbon(data=df.Ens,aes(x=T.a,ymin=low.mu/24,ymax=high.mu/24),color="#E75B64", alpha=0.2)+
+  geom_ribbon(data=df.Ens,aes(x=T.a,ymin=low.pop/24,ymax=high.pop/24),color="#278B9A", alpha=0.2)+
+  geom_errorbar(data=df.Ens,aes(x=T.a,ymin=Low/24,ymax=High/24), color="#D8AF39", alpha=0.5)  +
+  geom_line(data=df.Ens,aes(T.a, mean.mu.ind/24, color="#E75B64"), size=1.5) +
+  geom_line(data=df.Ens,aes(T.a, mean.mu.pop/24, color="#278B9A"), size=1.5) +
+  geom_point(data=subdf[which(subdf$model=="Mean.bout"),],aes(T.a,value/24,group=model,fill=model),pch=21,size=2, color="#D8AF39") +
+  geom_point(data=subdf[which(subdf$model=="bout.length"),],aes(T.a,value/24,group=model,fill=model),pch=21,size=2, color="black") +
+  geom_line(data=df.Ens,aes(x=T.a,y=Hayman.model,color="black"),linetype=1, size=1) +
+  scale_fill_manual(values=c("black","#D8AF39"),
+                    labels=c("Observed","Predicted (95% CI)")) +
+  scale_color_manual(values=c("#278B9A","#E75B64","black"), 
+                     labels=c("Population\nparameterization (95% CI)","Individual\nparameterization (95% CI)","Literature-based\nenergetics model (a)\nhydration model (b)")) +
+  labs(fill="Torpor duration", color="Model predictions")
+
+p.torpor.2 <- ggplot(subdf) + theme_classic() +
+  xlab("Water vapor pressure deficit (kPa)") + ylab("Time (Days)") +
+  geom_ribbon(data=df.Ens,aes(x=d.WVP,ymin=low.mu/24,ymax=high.mu/24),color="#E75B64", alpha=0.2)+
+  geom_ribbon(data=df.Ens,aes(x=d.WVP,ymin=low.pop/24,ymax=high.pop/24),color="#278B9A", alpha=0.2)+
+  geom_errorbar(data=df.Ens,aes(x=d.WVP,ymin=Low/24,ymax=High/24), color="#D8AF39", alpha=0.5)  +
+  geom_line(data=df.Ens,aes(d.WVP, mean.mu.ind/24, color="#E75B64"), size=1.5) +
+  geom_line(data=df.Ens,aes(d.WVP, mean.mu.pop/24, color="#278B9A"), size=1.5) +
+  geom_point(data=subdf[which(subdf$model=="Mean.bout"),],aes(d.WVP,value/24,group=model,fill=model),pch=21,size=2, color="#D8AF39") +
+  geom_point(data=subdf[which(subdf$model=="bout.length"),],aes(d.WVP,value/24,group=model,fill=model),pch=21,size=2, color="black") +
+  geom_line(data=df.Ens,aes(x=d.WVP,y=Haase.model,color="black"),linetype=1, size=1) +
+  theme(text = element_text(size=12),legend.position="none") +
+  scale_fill_manual(values=c("black","#D8AF39"),
+                    labels=c("Observed","Predicted (95% CI)")) +
+  scale_color_manual(values=c("#278B9A","#E75B64","black"), 
+                     labels=c("Population\nparameterization (95% CI)","Individual\nparameterization (95% CI)","Literature-based\nenergetics model (a)\nhydration model (b)")) +
+  labs(fill="Torpor duration", color="Model predictions")
+
+p.torpor.3 <- ggplot(df.pi, aes(T.a,d.WVP,color=pi)) + xlab("Temperature (C)") +
+  ylab("Water vapor deficit (kPa)") +theme_classic() +
+  scale_color_viridis_c(option="viridis", limits=c(0,1)) +
+  ylim(0,1.2) +
+  geom_point(size=4,pch=15) +
+  geom_point(data=df.Ens, aes(T.a,d.WVP), size=2, color="black") +
+  labs(color=TeX("$\\pi$")) 
+  # geom_path(data=df.Ens[which(df.Ens$index.bat==2),],aes(T.a,d.WVP), color="#403369", size=1) 
+  # geom_path(data=df.Ens[which(df.Ens$index.bat==2),],aes(T.a,d.WVP), color="#5C5992") +
+  # geom_path(data=df.Ens[which(df.Ens$index.bat==3),],aes(T.a,d.WVP), color="#AE93BE")
+
+  
+
+legend <- get_legend(p.torpor.1)
+p.torpor.1 <- p.torpor.1+theme(legend.position="none")
+
+plot_grid(p.torpor.1,p.torpor.2,p.torpor.3, legend, ncol=2, labels=c("a","b","c",""))
+
+
+
+
+
+
+
+
+
+
+
+
+
+#Temp/RH reads
+
+p1 <- ggplot() + theme_classic() + 
+  geom_line(data=L1,aes(DateTime,Temp),col="black") +
+  xlab("") +ylab("Temperature (Celsius)") +
+  theme(text=element_text(size=12))
+
+p2 <- ggplot() + theme_classic() +
+  geom_line(data=L1,aes(DateTime,RH),col="black") +
+  xlab("Date") + ylab("Relative Humidity (%)") +
+  theme(text=element_text(size=12))
+
+plot_grid(p1,p2,ncol=1)
+
+
+
+```

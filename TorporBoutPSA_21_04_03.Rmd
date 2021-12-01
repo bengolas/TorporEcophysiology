@@ -1,0 +1,161 @@
+---
+title: "TorporBoutPSA"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+
+#########################################################################
+# Code writting by Benjamin Golas, used to perform parameter 
+# sensitivity analysis on torpor bout duration
+#########################################################################
+```
+
+```{r LHS generation}
+library(tidyverse)
+library(lhs)
+
+set.seed(210118)
+
+n <- 300 #number of parameter combinations
+p <- 14   #number of parameters
+
+LHS <- randomLHS(n,p)
+
+#Mean/Variance parmaeters and calculation of moments for distributions of interest in sensitivity analysis
+mu.M.body <- 30
+s.M.body <- 25
+a.M.body <- log(mu.M.body)-(1/2)*log((s.M.body^2+mu.M.body^2)/mu.M.body^2)
+b.M.body <- sqrt(log((s.M.body^2+mu.M.body^2)/mu.M.body^2))
+
+mu.percent.fat <- 0.25
+s.percent.fat <- 0.1
+a.percent.fat <- (mu.percent.fat^2-mu.percent.fat^3-mu.percent.fat*s.percent.fat^2)/s.percent.fat^2
+b.percent.fat <- (mu.percent.fat-2*mu.percent.fat^2+mu.percent.fat^3-s.percent.fat^2+mu.percent.fat*s.percent.fat^2)/s.percent.fat^2
+
+mu.rEWL <- 2.5
+s.rEWL <- 3
+a.rEWL <- log(mu.M.body)-(1/2)*log((s.M.body^2+mu.M.body^2)/mu.M.body^2)
+b.rEWL <- sqrt(log((s.M.body^2+mu.M.body^2)/mu.M.body^2))
+
+mu.RH <- .85
+s.RH <- 0.12
+a.RH <- (mu.RH^2-mu.RH^3-mu.RH*s.RH^2)/s.RH^2
+b.RH <- (mu.RH-2*mu.RH^2+mu.RH^3-s.RH^2+mu.RH*s.RH^2)/s.RH^2
+
+
+#C,C.t,M.body,percent.fat,rEWL.body,rEWL.wing,RH,S,T.a,T.eu,T.tor.min,t.tor.max,TMR.min,WR
+LHS.bout <- data.frame(C = qunif(LHS[,1],0.1,0.5),       #conductance
+                         C.t = qunif(LHS[,2],0.005,0.5),     #conductance in torpor
+                         M.body = qlnorm(LHS[,3],a.M.body,b.M.body),  #body mass
+                         percent.fat = qbeta(LHS[,4],a.percent.fat,b.percent.fat),  #percent M.b that's fat
+                         rEWL.body = qunif(LHS[,5],0.05,0.25), #rate of cutaneous EWL attributable to body
+                         rEWL.wing = qunif(LHS[,6],0.15,0.45), #EWL rate attributable to wings
+                         RH = qbeta(LHS[,7],a.RH,b.RH), #Relative humidity
+                         S = qunif(LHS[,8],0.06,0.25), #Specific heat of tissue
+                         T.a = qunif(LHS[,9],-3,16), #ambient temperature
+                         T.eu = qnorm(LHS[,10],35.5,1), #Euthermic host temperature
+                         T.tor.min = qunif(LHS[,11],1.5,12), #Min. maintained torpor temp
+                         t.tor.max = qunif(LHS[,12],700,2000), #max time spent in torpor
+                         TMR.min = qunif(LHS[,13],0.01,0.25), #Min. torpid metabolic rate
+                         WR = qunif(LHS[,14],10,100) #Warming rate for arousal
+                      )
+
+```
+
+```{r function}
+
+TORPOR.BOUT <- function(C,C.t,M.body,percent.fat,rEWL.body,rEWL.wing,RH,S,T.a,T.eu,T.tor.min,t.tor.max,TMR.min,WR){
+  
+  #Estimated values dependent on parameter inputs
+  M.fat <- M.body*percent.fat
+  M.lean <- M.body - M.fat #total lean body mass
+  SA.body <- 10*M.body^(2/3) #body surface area
+  SA.wing <- SA.body*19.68/39.36 #wing surface area, per Haase2019
+  
+  T.tor <- T.a #assumption of published models is T.b=T.a
+  
+  SVP.a <- .611*exp((17.503*T.a)/(T.a+240.97)) #air saturated vapor pressure
+  WVP.a <- SVP.a*RH #air water vapor pressure
+  
+  #Estimate cooling rate, and then cooling time
+  CR <- C*M.body^(0.67)*log10(T.eu-T.a)/(S*M.body) #cooling rate
+  t.cool <- log10(T.eu-T.tor)/CR #cooling time
+  
+  #Estimate time in torpor based on temperature only (Hayman 2016 model)
+  Q10 <- 1.6+0.26*T.a-0.006*T.a^2
+  t.torpor.T <- ifelse(T.a<=T.tor.min, 
+                       t.tor.max/(1+(T.tor.min-T.a)*C.t/TMR.min),
+                       t.tor.max/Q10^((T.a-T.tor.min)/10))
+  
+  #Estimate time in torpor based on water vapor pressure (Haase 2019 model)
+  WVP.bat <- .611*exp((17.503*T.a)/(T.a+240.97)) #Haase2019 conversion
+  d.WVP <- max(WVP.bat-WVP.a,0) #difference in water vapor pressure between
+                                #bat and air. Assuming bat maintains equal or
+                                #warmer temp to environment, d.WVP>=0
+  CEWL <- d.WVP*((SA.wing*rEWL.wing)+(SA.body*rEWL.body)) #cutaneous EWL
+  rav <- TMR.min*M.body/(0.2095*0.30*10^3) #respired air volume
+  Sat.deficit <- d.WVP/(.46152*(273.15+T.a)) #saturation deficit converting 
+                                             #d.WVP using ideal gas law
+  REWL <- rav*Sat.deficit #respiratory EWL
+  t.torpor.WVP <- M.lean*1000*0.027/(CEWL+REWL)
+  
+  
+  #Estimate warming rate
+  t.warm <- (T.eu-T.a)/WR
+  
+  #Time to arousal for each model investigated
+  t.bout.T <- t.cool + t.torpor.T + t.warm #Hayman2016
+  t.bout.WVP <- t.cool + min(t.torpor.T, t.torpor.WVP) + t.warm #Haase2019
+  
+  output <- c(t.bout.T, t.bout.WVP)
+  return(output)
+  
+} #end function
+
+```
+
+```{r run function}
+
+df.bout <- mapply(TORPOR.BOUT, C=LHS.bout$C, C.t=LHS.bout$C.t, 
+                  M.body=LHS.bout$M.body, percent.fat=LHS.bout$percent.fat,
+                  rEWL.body=LHS.bout$rEWL.body, rEWL.wing=LHS.bout$rEWL.wing,
+                  RH=LHS.bout$RH, S=LHS.bout$S, T.a=LHS.bout$T.a,
+                  T.eu=LHS.bout$T.eu, T.tor.min=LHS.bout$T.tor.min,
+                  t.tor.max=LHS.bout$t.tor.max, TMR.min=LHS.bout$TMR.min,
+                  WR=LHS.bout$WR)
+df.bout <- t(df.bout)
+colnames(df.bout) <- c("T.model","TWVP.model")
+```
+
+```{r sensitivity analysis with function output}
+library(sensitivity)
+library(latex2exp)
+
+Y.T.model <- pcc(LHS.bout, df.bout[,1], rank=TRUE)
+T.T.model <- Y.T.model$PRCC*sqrt((n-2-p)/(1-Y.T.model$PRCC^2))
+
+Y.TWVP.model <- pcc(LHS.bout, df.bout[,2], rank=TRUE)
+T.TWVP.model <- Y.TWVP.model$PRCC*sqrt((n-2-p)/(1-Y.T.model$PRCC^2))
+
+qt(c(0.025,0.975),n-2-p)
+
+T.dat <- as.data.frame(rbind(T.T.model,T.TWVP.model))
+T.dat <- as.data.frame(cbind(T.dat,c(rep("T.model",p),rep("TWVP.model",p)),rep(rownames(T.T.model),2)))
+colnames(T.dat) <- c("value","model","parameter")
+
+
+ggplot(T.dat) + theme_classic() + xlab("") + ylab("Sensitivity") +
+  theme(axis.text.x = element_text(hjust=1)) +
+  geom_bar(aes(x=reorder(parameter, abs(value)),value,fill=model),stat="identity",position=position_dodge()) +
+  scale_fill_manual(name="Model",values=c("black","grey"),labels=c("Energetics","Hydration")) +
+  geom_hline(yintercept=c(-1.968,1.968),linetype=2) +
+  scale_x_discrete(labels=c("T.a"=parse(text=TeX("$T_a$")),"C.t"=parse(text=TeX("$C_t$")),"RH"="RH","T.tor.min"=parse(text=TeX("$T_{tor,min}$")),"TMR.min"=parse(text=TeX("$TMR_{min}$")),"rEWL.body"=parse(text=TeX("$rEWL_{body}$")),"t.tor.max"=parse(text=TeX("$t_{tor,max}$")),"M.body"=parse(text=TeX("$M_{body}$")),"C"=parse(text=TeX("$C_{eu}$")),"percent.fat"="percent fat","S"="S","rEWL.wing"=parse(text=TeX("$rEWL_{wing}$")),"WR"="WR","T.eu"=parse(text=TeX("$T_{eu}$")))) +
+  coord_flip()
+```
+
+
